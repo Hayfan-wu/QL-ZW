@@ -4,7 +4,7 @@
 @Author       : Hayfan-wu
 @Date         : 2025-06-25
 @Description  : 中望技术社区自动签到脚本（青龙面板版）
-@Version      : 6.4.0
+@Version      : 6.5.0
 
 环境变量:
   ZWSOFT_USERNAME     - 中望社区账号（手机号/邮箱），多账号用换行或&分隔
@@ -28,6 +28,11 @@ cron: 0 0 1 * * *
   2. 多账号格式：每行一个账号，密码与账号按顺序一一对应
   3. 推荐使用 auto 模式，自动尝试 API 模式，失败自动降级到 Selenium
   4. 如果 API 模式不可用，可切换为 selenium 模式（需额外安装依赖）
+
+更新日志 v6.5.0:
+  - 优化 WXPusher 消息列表显示：添加 summary 字段，列表只显示简短标题
+  - 消息详情页仍展示完整的签到信息（账号、连续天数、积分等）
+  - 优化 HTML 排版，行间距更大更易读
 
 更新日志 v6.4.0:
   - 修复重复推送问题：配置 WXPusher 后自动禁用青龙面板通知，避免同时收到两条相同消息
@@ -173,15 +178,17 @@ def wxpusher_push(title, content):
         
         url = 'https://wxpusher.zjiecode.com/api/send/message'
         
-        # 构建HTML内容
-        html_content = f"<h3 style='margin:0 0 10px 0;'>{title}</h3>\n"
-        html_content += "<div style='font-size:14px; line-height:1.6;'>\n"
+        # 构建HTML内容（不含标题，标题通过summary字段控制）
+        html_content = "<div style='font-size:14px; line-height:1.8;'>\n"
+        html_content += f"<b style='font-size:16px;'>{title}</b><br/>\n"
+        html_content += "<br/>\n"
         html_content += content.replace('\n', '<br/>\n')
         html_content += "\n</div>"
         
         data = {
             'appToken': WXPUSHER_APP_TOKEN,
             'content': html_content,
+            'summary': title,  # 消息摘要/列表显示的标题
             'contentType': 2,  # 2=HTML
             'uids': uids,
         }
@@ -1075,7 +1082,7 @@ def main():
     start_time = datetime.now()
     
     print(f"\n{'#'*50}")
-    print(f"#  中望技术社区自动签到 v6.4.0 (青龙面板版)")
+    print(f"#  中望技术社区自动签到 v6.5.0 (青龙面板版)")
     print(f"#  运行模式: {RUN_MODE}")
     print(f"#  执行时间: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"{'#'*50}")
