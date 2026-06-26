@@ -4,7 +4,7 @@
 @Author       : Hayfan-wu
 @Date         : 2025-06-25
 @Description  : 中望技术社区自动签到脚本（青龙面板版）
-@Version      : 6.2.0
+@Version      : 6.3.0
 
 环境变量:
   ZWSOFT_USERNAME     - 中望社区账号（手机号/邮箱），多账号用换行或&分隔
@@ -27,6 +27,12 @@ cron: 0 0 1 * * *
   2. 多账号格式：每行一个账号，密码与账号按顺序一一对应
   3. 推荐使用 auto 模式，自动尝试 API 模式，失败自动降级到 Selenium
   4. 如果 API 模式不可用，可切换为 selenium 模式（需额外安装依赖）
+
+更新日志 v6.3.0:
+  - 修复连续签到天数显示错误：改为使用 mission.always 字段（前端显示"连续签到：XX天"）
+  - 之前错误使用 tk.days 字段，实际 tk.days 是"未签到天数"（用于填坑功能）
+  - 增强 WXPusher 推送：添加 SSL 错误自动降级、详细调试日志
+  - 优化 WXPusher HTML 通知格式，更美观易读
 
 更新日志 v6.2.0:
   - 新增 WXPusher 微信推送支持（配置 WXPUSHER_APP_TOKEN 和 WXPUSHER_UIDS）
@@ -133,6 +139,7 @@ def wxpusher_push(title, content):
         bool: 是否推送成功
     """
     if not HAS_WXPUSHER:
+        log_debug("WXPusher未配置，跳过推送")
         return False
     
     try:
@@ -144,11 +151,15 @@ def wxpusher_push(title, content):
             log_error("WXPusher UID列表为空")
             return False
         
+        log_debug(f"WXPusher推送，UID数量: {len(uids)}")
+        
         url = 'https://wxpusher.zjiecode.com/api/send/message'
         
         # 构建HTML内容
-        html_content = f"<h3>{title}</h3>\n"
+        html_content = f"<h3 style='margin:0 0 10px 0;'>{title}</h3>\n"
+        html_content += "<div style='font-size:14px; line-height:1.6;'>\n"
         html_content += content.replace('\n', '<br/>\n')
+        html_content += "\n</div>"
         
         data = {
             'appToken': WXPUSHER_APP_TOKEN,
@@ -157,18 +168,33 @@ def wxpusher_push(title, content):
             'uids': uids,
         }
         
-        resp = requests.post(url, json=data, timeout=30)
+        log_debug(f"WXPusher请求URL: {url}")
+        log_debug(f"WXPusher请求数据: appToken=***, uids={uids}")
+        
+        # 尝试请求，支持SSL验证失败时跳过
+        try:
+            resp = requests.post(url, json=data, timeout=30)
+        except requests.exceptions.SSLError:
+            log_debug("WXPusher SSL验证失败，尝试跳过验证...")
+            resp = requests.post(url, json=data, timeout=30, verify=False)
+        
+        log_debug(f"WXPusher响应状态码: {resp.status_code}")
+        log_debug(f"WXPusher响应内容: {resp.text[:200]}")
+        
         result = resp.json()
         
         if result.get('code') == 1000:
-            log_debug(f"WXPusher推送成功")
+            log_info("WXPusher推送成功")
             return True
         else:
-            log_error(f"WXPusher推送失败: {result.get('msg', '未知错误')}")
+            log_error(f"WXPusher推送失败: code={result.get('code')}, msg={result.get('msg', '未知错误')}")
             return False
             
     except Exception as e:
         log_error(f"WXPusher推送异常: {e}")
+        if DEBUG:
+            import traceback
+            traceback.print_exc()
         return False
 
 
@@ -639,9 +665,9 @@ class ZwCheckinAPI:
                 credit_val = mission.get('credit', '')
                 already_checked = bool(credit_val)
                 
-                # 连续签到天数
-                tk = mission.get('tk', {})
-                consecutive_days = tk.get('days', 0) if isinstance(tk, dict) else 0
+                # 连续签到天数（前端显示"连续签到：XX天"用的是always字段）
+                # tk.days 是"未签到天数"（用于填坑功能）
+                consecutive_days = int(mission.get('always', 0)) if mission.get('always') else 0
                 
                 total_points = mission.get('my_credit', 0)
                 points_earned = credit_val if credit_val else 0
@@ -1031,7 +1057,7 @@ def main():
     start_time = datetime.now()
     
     print(f"\n{'#'*50}")
-    print(f"#  中望技术社区自动签到 v6.2.0 (青龙面板版)")
+    print(f"#  中望技术社区自动签到 v6.3.0 (青龙面板版)")
     print(f"#  运行模式: {RUN_MODE}")
     print(f"#  执行时间: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"{'#'*50}")
