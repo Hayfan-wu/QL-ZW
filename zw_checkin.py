@@ -4,7 +4,7 @@
 @Author       : Hayfan-wu
 @Date         : 2025-06-25
 @Description  : 中望技术社区自动签到脚本（青龙面板版）
-@Version      : 3.1.0
+@Version      : 3.2.0
 
 环境变量:
   ZWSOFT_USERNAME  - 中望社区账号（手机号/邮箱），多账号用换行或&分隔
@@ -25,6 +25,13 @@ cron: 0 0 1 * * *
   2. 多账号格式：每行一个账号，密码与账号按顺序一一对应
   3. 推荐使用 auto 模式，自动尝试 API 模式，失败自动降级到 Selenium
   4. 如果 API 模式不可用，可切换为 selenium 模式（需额外安装依赖）
+
+更新日志 v3.2.0:
+  - 修复b2_token获取问题，增加多步重定向跟踪
+  - 新增cookie模式支持（通过session cookie直接调用API）
+  - 登录前先访问论坛首页建立会话
+  - 增加从页面HTML中提取b2_token的备用方案
+  - 优化错误诊断日志
 
 更新日志 v3.1.0:
   - 修复登录跳转URL解码问题（需要两次 decodeURIComponent）
@@ -269,6 +276,24 @@ class ZwCheckinAPI:
             log_error(f"获取公钥异常: {e}")
             return False
     
+    def _visit_forum_home(self):
+        """
+        先访问论坛首页，建立会话和基础cookie
+        
+        Returns:
+            bool: 是否成功
+        """
+        log_debug("正在访问论坛首页，建立会话...")
+        
+        try:
+            response = self.session.get(FORUM_BASE, timeout=30)
+            log_debug(f"论坛首页状态码: {response.status_code}")
+            log_debug(f"论坛首页Cookies: {list(self.session.cookies.keys())}")
+            return response.status_code == 200
+        except Exception as e:
+            log_debug(f"访问论坛首页异常: {e}")
+            return False
+    
     def _get_login_page(self):
         """
         访问登录页面，获取表单参数
@@ -366,6 +391,9 @@ class ZwCheckinAPI:
             return False
         
         try:
+            # 0. 先访问论坛首页，建立会话
+            self._visit_forum_home()
+            
             # 1. 获取RSA公钥
             if not self._get_public_key():
                 log_error("获取公钥失败，无法继续登录")
@@ -469,55 +497,122 @@ class ZwCheckinAPI:
                 
                 log_debug(f"最终跳转URL: {redirect_url[:100]}...")
                 
-                # 访问跳转URL（会经过多次重定向，最终到callback页面）
-                # 使用 history 跟踪重定向链
-                callback_response = self.session.get(
-                    redirect_url,
-                    allow_redirects=True,
-                    timeout=30
-                )
+                # 访问跳转URL，跟踪重定向过程
+                # 先手动跟踪重定向，检查每一步的cookie
+                current_url = redirect_url
+                max_redirects = 10
+                code_found = None
                 
-                log_debug(f"最终URL: {callback_response.url[:150]}...")
-                log_debug(f"当前Cookies: {list(self.session.cookies.keys())}")
-                
-                # 7. 检查是否跳转到了callback页面
-                if 'zwforumchild/login.php' in callback_response.url:
-                    log_debug("已跳转到论坛回调页面")
+                for i in range(max_redirects):
+                    log_debug(f"重定向步骤 {i+1}: 访问 {current_url[:80]}...")
                     
-                    # 从 URL 中提取 code
-                    parsed = urllib.parse.urlparse(callback_response.url)
-                    query_params = urllib.parse.parse_qs(parsed.query)
-                    code = query_params.get('code', [''])[0]
+                    step_response = self.session.get(
+                        current_url,
+                        allow_redirects=False,
+                        timeout=30
+                    )
                     
-                    if code:
-                        log_debug(f"获取到授权码: {code[:20]}...")
-                        
-                        # 8. 用授权码换取 token
-                        return self._exchange_token(code)
-                    else:
-                        log_error("登录失败：未获取到授权码")
-                        log_debug(f"回调URL参数: {list(query_params.keys())}")
-                        return False
-                else:
-                    # 检查是否已经有b2_token cookie
-                    b2_token_cookie = self.session.cookies.get('b2_token')
-                    if b2_token_cookie:
-                        self.b2_token = b2_token_cookie
-                        log_info("登录成功（获取到 b2_token）")
+                    log_debug(f"  状态码: {step_response.status_code}")
+                    log_debug(f"  当前Cookies: {list(self.session.cookies.keys())}")
+                    
+                    # 检查是否有b2_token
+                    if self.session.cookies.get('b2_token'):
+                        self.b2_token = self.session.cookies.get('b2_token')
+                        log_info("登录成功（获取到 b2_token cookie）")
                         return True
                     
-                    # 检查最终URL中是否有code参数（可能路径不同但有code）
-                    if 'code=' in callback_response.url:
-                        parsed = urllib.parse.urlparse(callback_response.url)
+                    # 检查当前URL中是否有code
+                    if 'code=' in step_response.url:
+                        parsed = urllib.parse.urlparse(step_response.url)
                         query_params = urllib.parse.parse_qs(parsed.query)
                         code = query_params.get('code', [''])[0]
                         if code:
-                            log_debug(f"从最终URL中获取到授权码: {code[:20]}...")
-                            return self._exchange_token(code)
+                            code_found = code
+                            log_debug(f"在URL中找到授权码: {code[:20]}...")
                     
-                    log_error(f"登录失败：未跳转到预期的回调页面")
-                    log_debug(f"当前URL: {callback_response.url[:150]}")
-                    return False
+                    # 检查响应body中是否有b2_token（可能通过JS设置）
+                    page_text = step_response.text
+                    if 'b2_token' in page_text:
+                        # 尝试从页面中提取token
+                        b2_match = re.search(r'b2_token["\s:=]+["\']([^"\']+)["\']', page_text)
+                        if b2_match:
+                            self.b2_token = b2_match.group(1)
+                            log_info("登录成功（从页面中提取到 b2_token）")
+                            return True
+                    
+                    # 检查是否有重定向
+                    if step_response.status_code in [301, 302, 303, 307, 308]:
+                        next_url = step_response.headers.get('Location', '')
+                        if not next_url:
+                            break
+                        if next_url.startswith('/'):
+                            next_url = f'https://forum.zwsoft.cn{next_url}' if 'forum.zwsoft.cn' in current_url else f'https://accounts.zwsoft.cn{next_url}'
+                        elif next_url.startswith('http'):
+                            pass
+                        else:
+                            # 相对路径
+                            from urllib.parse import urljoin
+                            next_url = urljoin(current_url, next_url)
+                        
+                        log_debug(f"  重定向到: {next_url[:80]}...")
+                        current_url = next_url
+                    else:
+                        # 没有重定向了，检查最终页面
+                        log_debug(f"到达最终页面: {step_response.url[:80]}...")
+                        
+                        # 再检查一次code
+                        if 'code=' in step_response.url and not code_found:
+                            parsed = urllib.parse.urlparse(step_response.url)
+                            query_params = urllib.parse.parse_qs(parsed.query)
+                            code = query_params.get('code', [''])[0]
+                            if code:
+                                code_found = code
+                        
+                        break
+                
+                # 如果找到了授权码，用它换取token
+                if code_found:
+                    log_debug(f"使用授权码换取token...")
+                    return self._exchange_token(code_found)
+                
+                # 如果还没有b2_token，尝试用access_token直接调用API
+                log_debug("未获取到b2_token，尝试其他方式...")
+                
+                # 方案B: 检查是否有access_token相关的cookie
+                all_cookies = dict(self.session.cookies)
+                log_debug(f"所有Cookie: {list(all_cookies.keys())}")
+                
+                # 方案C: 尝试直接访问论坛的用户页面，看看是否已登录
+                log_debug("尝试访问论坛用户接口测试登录状态...")
+                test_headers = {
+                    'Content-Type': 'application/json',
+                    'Referer': FORUM_BASE + '/'
+                }
+                
+                # 尝试不带token调用一次，看看返回什么
+                test_response = self.session.post(
+                    USER_MISSION_URL,
+                    headers=test_headers,
+                    json={},
+                    timeout=30
+                )
+                
+                log_debug(f"测试接口响应: {test_response.status_code}")
+                
+                if test_response.status_code == 200:
+                    test_data = test_response.json()
+                    mission = test_data.get('mission', {})
+                    if mission.get('current_user', 0) > 0:
+                        log_info("登录成功（已通过cookie登录论坛）")
+                        # 尝试从cookie中找可用的token
+                        # 或者可能不需要token，cookie已经够用了
+                        # 先设置一个标记，签到时用cookie方式
+                        self.b2_token = '__cookie_mode__'
+                        return True
+                
+                log_error(f"登录失败：未能获取到有效的登录凭证")
+                log_debug(f"最终URL: {current_url[:100]}")
+                return False
             
             # status=0: 登录失败
             elif status == 0:
@@ -688,9 +783,13 @@ class ZwCheckinAPI:
         """
         try:
             headers = {
-                'Authorization': f'Bearer {self.b2_token}',
-                'Content-Type': 'application/json'
+                'Content-Type': 'application/json',
+                'Referer': FORUM_BASE + '/'
             }
+            
+            # 如果有b2_token（不是cookie模式），添加Authorization头
+            if self.b2_token and self.b2_token != '__cookie_mode__':
+                headers['Authorization'] = f'Bearer {self.b2_token}'
             
             response = self.session.post(
                 USER_MISSION_URL,
@@ -786,9 +885,13 @@ class ZwCheckinAPI:
             
             # 执行签到
             headers = {
-                'Authorization': f'Bearer {self.b2_token}',
-                'Content-Type': 'application/json'
+                'Content-Type': 'application/json',
+                'Referer': FORUM_BASE + '/'
             }
+            
+            # 如果有b2_token（不是cookie模式），添加Authorization头
+            if self.b2_token and self.b2_token != '__cookie_mode__':
+                headers['Authorization'] = f'Bearer {self.b2_token}'
             
             response = self.session.post(
                 CHECKIN_URL,
@@ -1171,7 +1274,7 @@ def main():
     start_time = datetime.now()
     
     print(f"\n{'#'*50}")
-    print(f"#  中望技术社区自动签到 v3.1.0 (青龙面板版)")
+    print(f"#  中望技术社区自动签到 v3.2.0 (青龙面板版)")
     print(f"#  运行模式: {RUN_MODE}")
     print(f"#  执行时间: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"{'#'*50}")
