@@ -28,8 +28,8 @@
 
 | 变量名 | 说明 | 必填 |
 |--------|------|------|
-| `ZWSOFT_USERNAME` | 中望社区账号（手机号/邮箱），多账号换行分隔 | ✅ |
-| `ZWSOFT_PASSWORD` | 中望社区密码，多账号换行分隔（与账号一一对应） | ✅ |
+| `ZWSOFT_USERNAME` | 社区账号（手机号/邮箱），多账号换行分隔 | ✅ |
+| `ZWSOFT_PASSWORD` | 社区密码，多账号换行分隔（与账号一一对应） | ✅ |
 | `ZWSOFT_NOTIFY` | 通知级别：0=关闭 1=仅异常 2=全部通知（默认1） | ❌ |
 | `ZWSOFT_DEBUG` | 调试模式：true/false（默认false） | ❌ |
 | `ZWSOFT_RETRY_COUNT` | 失败重试次数（默认1次，即总共尝试2次） | ❌ |
